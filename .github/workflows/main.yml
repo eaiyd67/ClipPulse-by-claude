@@ -1,0 +1,113 @@
+name: Build ClipPulse Debug APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Verify pre-installed Android SDK & Accept Licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK_DIR" ]; then
+            echo "ERROR: Pre-installed Android SDK not found at $SDK_DIR"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK_DIR/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)
+          fi
+          if [ -n "${SDKMANAGER:-}" ] && [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses >/dev/null || true
+            "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" >/dev/null || true
+          else
+            echo "WARN: sdkmanager binary not found; relying on pre-installed SDK packages."
+          fi
+
+      - name: Verify all project part files exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          REQUIRED_FILES=(
+            "build_project.py"
+            "parts/part_gradle.py"
+            "parts/part_core.py"
+            "parts/part_ai.py"
+            "parts/part_scan.py"
+            "parts/part_export.py"
+            "parts/part_storage.py"
+            "parts/part_ui_1.py"
+            "parts/part_ui_2.py"
+          )
+          MISSING=0
+          for f in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "MISSING REQUIRED FILE: $f"
+              MISSING=1
+            else
+              echo "OK: $f"
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo "Aborting: one or more required part files are missing."
+            exit 1
+          fi
+
+      - name: Generate Android project sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 build_project.py
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            echo "===== ERROR SUMMARY FROM build.log ====="
+            grep -nE "e: |ERROR:|FAILURE:|Exception:|Unresolved reference|Type mismatch|Execution failed for task" build.log | head -n 120 || true
+            exit "$BUILD_EXIT"
+          fi
+
+      - name: Upload build.log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload ClipPulse Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipPulse-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
